@@ -4,11 +4,15 @@ Trains the spiking velocity field on a 1-D Gaussian target with the certified ex
 gradient, then samples with the spike-resolution sampler at several T. Three read-outs:
 
   (A) velocity coding error eps_quant(T) = mean||v^T - v^inf||  ->  expect O(1/T)
-      (the deterministic grid-quantization lemma; robust to training quality);
-  (B') quantization-only distance W2(p_hat_spike(T), p_hat_exact)  [training-independent,
-      eps_train cancels because both use the same trained net and shared noise];
-  (B) headline: W2(p_hat_spike(T), q) vs T, fit a + b/T  (monotone decrease at rate
-      1/T toward the training/expressivity floor a = W2(exact sampler, q)).
+      (a sanity check that an O(1/T) spike-TIME coding term exists; this is the generic
+      rate of grid-sampling a smooth readout, not a measurement of any specific constant);
+  (B') quantization-only distance W2(p_hat_spike(T), p_hat_exact)  [the headline trend:
+      training-independent because both samplers use the same trained net and shared
+      noise, so it isolates the O(1/T) spike-time term from the training floor; note it
+      measures convergence to the *exact (continuous-time) sampler*, not to q];
+  (B) W2(p_hat_spike(T), q) vs T  [floor-dominated: the spike effect on the distance to
+      q is second-order ~ W2(spike,exact)^2/(2*floor), so the O(1/T) term is below
+      sampling noise here -- reported for honesty, not as a clean a+b/T fit].
 
 Variance reduction: shared x0 across T + analytic target quantiles + averaging over
 n_rep replicates make the small b/T term visible above estimator noise. The default

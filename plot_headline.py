@@ -62,13 +62,15 @@ def main():
     ax[1].set_xlabel("resolution $T$"); ax[1].set_ylabel(r"$W_2(\hat p_T,\hat p_\infty)$")
     ax[1].legend(frameon=False)
 
-    # (c) generation distance to target with a + b/T fit and the floor a
+    # (c) distance to the target q: floor-dominated, so we show the data and the floor
+    # but NOT an a+b/T fit -- the spike effect here is second-order (~b'^2/floor) and sits
+    # below the inter-replicate error, so a fitted slope would be reading noise.
     ax[2].errorbar(Ts, w2, yerr=sem, fmt="o", color=C_DATA, ms=5, capsize=3, label="measured")
-    grid = np.linspace(Ts.min(), Ts.max(), 100)
-    ax[2].plot(grid, fa + fb / grid, "--", color=C_FIT, lw=1.3,
-               label=fr"$a+b/T$ ($R^2$={fr2:.2f})")
-    ax[2].axhline(a_inf, color=C_FLOOR, lw=1.2, ls=":", label=fr"floor $a={a_inf:.3f}$")
-    ax[2].set_title("(c) distance to target")
+    ax[2].axhline(a_inf, color=C_FLOOR, lw=1.2, ls=":",
+                  label=fr"training floor $\approx{a_inf:.3f}$")
+    lo = min(w2.min() - sem.max(), a_inf); hi = max(w2.max() + sem.max(), a_inf)
+    ax[2].set_ylim(lo - 0.02, hi + 0.02)
+    ax[2].set_title("(c) distance to target (floor-dominated)")
     ax[2].set_xlabel("resolution $T$"); ax[2].set_ylabel(r"$W_2(\hat p_T, q)$")
     ax[2].legend(frameon=False)
 

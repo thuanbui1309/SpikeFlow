@@ -1,11 +1,15 @@
 """Spike-resolution velocity field, PF-ODE sampler, and 1-D Wasserstein-2.
 
 The generation-time spiking resolution is a grid of T time-slots over the neuron
-window: hidden spike times live on a 1/T grid (firing-rate quantization). Snapping
-the readout-feeding spike times to that grid realises the deterministic O(1/T)
-coding error of the lemma; as T grows the velocity field converges to the exact
-(continuous-time) field, and the generated distribution tightens toward the target
-along the a + b/T trend predicted for the spiking sampler.
+window: the readout-feeding spike TIMES are snapped to a 1/T temporal grid. This is
+*temporal-resolution* (spike-time) quantization, NOT firing-rate quantization: spike
+counts and order are unchanged, only their times are rounded (precision <= S/(2T)).
+The smooth leaky-integrator readout V_out(S)=sum W_out exp(-(S-s)/tau_out) then has a
+deterministic O(1/T) coding error in those times; as T grows the velocity field
+converges to the exact (continuous-time) field at rate O(1/T). (This temporal-grid
+form is the one consistent with the smooth integrator readout chosen so the exact
+gradient does not degenerate; a firing-rate/count grid would freeze spike counts and
+make the time-derivative vanish.)
 """
 
 from __future__ import annotations
