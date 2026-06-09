@@ -66,26 +66,45 @@ def fit_a_plus_b_over_T(Ts, vals):
 
 
 def w2_vs_T(p: NetworkParams, Ts, q_mu: float, q_sigma: float, n_samp: int = 2000,
-            n_steps: int = 16, n_workers: int = 1, seed: int = 7) -> dict:
-    """W2(p_hat_spike(T), q) for each T plus the exact-sampler floor and a+b/T fit.
+            n_steps: int = 16, n_workers: int = 1, seed: int = 7, n_rep: int = 1) -> dict:
+    """W2(p_hat_spike(T), q) vs T, the exact-sampler floor, the paired quantization
+    distance W2(spike(T), exact), and the a + b/T fit.
 
-    q is N(q_mu, q_sigma^2). x0 noise is drawn once and shared across all T.
+    q is N(q_mu, q_sigma^2). Within a replicate the x0 noise is shared across all T
+    (paired). n_rep independent replicates (different x0 seeds) are averaged: the b/T
+    term on the full W2-to-q is small relative to one replicate's sampling noise, so
+    averaging over replicates (noise ~ 1/sqrt(n_rep)) is what makes the trend clean.
+    Each row carries the per-T standard error across replicates.
     """
-    rng = np.random.default_rng(seed)
-    x0_batch = rng.standard_normal((n_samp, p.m))
-    rows = []
-    for T in Ts:
-        gen = sample_population(p, x0_batch, T, n_steps, n_workers)
-        rows.append((int(T), w2_to_gaussian(gen, q_mu, q_sigma)))
-    gen_inf = sample_population(p, x0_batch, None, n_steps, n_workers)
-    a_inf = w2_to_gaussian(gen_inf, q_mu, q_sigma)
-    a, b, r2 = fit_a_plus_b_over_T([T for T, _ in rows], [w for _, w in rows])
+    from .generation import w2_1d  # paired quantization distance (training-independent)
+
+    Ts = [int(T) for T in Ts]
+    perT_q = {T: [] for T in Ts}    # W2(spike(T), q) per replicate
+    perT_quant = {T: [] for T in Ts}  # W2(spike(T), exact) per replicate
+    floors, means, stds = [], [], []
+    for r in range(n_rep):
+        x0 = np.random.default_rng(seed + r).standard_normal((n_samp, p.m))
+        gen = {T: sample_population(p, x0, T, n_steps, n_workers) for T in Ts}
+        gen_inf = sample_population(p, x0, None, n_steps, n_workers)
+        for T in Ts:
+            perT_q[T].append(w2_to_gaussian(gen[T], q_mu, q_sigma))
+            perT_quant[T].append(w2_1d(gen[T], gen_inf))
+        floors.append(w2_to_gaussian(gen_inf, q_mu, q_sigma))
+        means.append(float(gen_inf.mean())); stds.append(float(gen_inf.std()))
+
+    rows = [(T, float(np.mean(perT_q[T])), float(np.std(perT_q[T]) / np.sqrt(n_rep)))
+            for T in Ts]
+    quant = [(T, float(np.mean(perT_quant[T]))) for T in Ts]
+    a_inf = float(np.mean(floors))
+    a, b, r2 = fit_a_plus_b_over_T([T for T, *_ in rows], [w for _, w, _ in rows])
     mono = all(rows[i][1] >= rows[i + 1][1] - 1e-4 for i in range(len(rows) - 1))
     return {
-        "rows": rows,                       # [(T, W2(spike_T, q)), ...]
+        "rows": rows,                        # [(T, mean W2(spike_T, q), sem), ...]
+        "quant": quant,                      # [(T, W2(spike_T, exact)), ...]  (part B')
         "a_inf": a_inf,                      # W2(exact sampler, q) = empirical floor
         "fit": {"a": a, "b": b, "r2": r2},   # W2(T) ~ a + b/T
         "monotone": mono,
-        "gen_mean": float(gen_inf.mean()),
-        "gen_std": float(gen_inf.std()),
+        "gen_mean": float(np.mean(means)),
+        "gen_std": float(np.mean(stds)),
+        "n_rep": n_rep,
     }
