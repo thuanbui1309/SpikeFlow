@@ -1,0 +1,16 @@
+[project]
+name = "spikeflow"
+version = "0.1.0"
+description = "Exact event-driven adjoint for a spiking velocity field trained by flow matching: a finite-difference gate certifying the gradient, and the Theorem-2 W2-vs-resolution generation bound."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+
+[tool.uv]
+# Run scripts in-tree (import the local `spikeflow/` package); do not build/install it.
+package = false

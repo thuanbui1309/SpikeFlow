@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+results/
+*.npz
+*.png
+*.pdf
+.claude/
+.DS_Store
