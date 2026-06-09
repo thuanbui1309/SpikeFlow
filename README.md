@@ -8,7 +8,7 @@ NumPy. Two self-contained experiments:
    differences and an independent forward-mode sensitivity. No autodiff, no surrogate gradient.
 2. **Generation bound (W2 vs resolution T)** — trains the spiking velocity field and measures the
    Wasserstein-2 distance of the spike-resolution sampler to the target as a function of the
-   firing-rate quantization resolution `T`, expected to follow `a + b/T`.
+   temporal-resolution (spike-time) quantization `T`, expected to follow `a + b/T`.
 
 ## Model
 
@@ -34,6 +34,10 @@ uv sync --extra plot    # also install matplotlib (figure plotting)
 ```bash
 # 1. Gradient gate (certification). Fast; pure NumPy.
 uv run python run_finite_diff_gate.py
+
+# 1b. Torch-path gate: validates the torch.autograd wrapper against the NumPy
+#     finite-difference oracle, float64 end-to-end (needs torch installed).
+uv run python run_torch_gate.py
 
 # 2. Generation bound (headline W2-vs-T). Scale n-samp / n-workers on a many-core server.
 uv run python run_toy_w2.py --quick                              # local smoke test
