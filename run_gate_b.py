@@ -16,12 +16,10 @@ Verdict per (T, K):
 The LOCAL SMOKE config (tiny m) exercises the pipeline + verdict logic only; it is
 NOT the GO/PIVOT decision. The real verdict is the wide-FC m=3072 multi-T run.
 
-Run:  uv run python run_gate_b.py                                          # smoke
-      uv run python run_gate_b.py --net fc --n1 16 --n2 16 --m 1 --T 16 64 \
-                                  --K 50 --n-samples 10 --n-workers 1       # smoke
-      uv run python run_gate_b.py --net fc --m 3072 --T 16 32 64 128 256 1024 \
-                                  --K 50 100 --n-samples 16 --n-workers 64 \
-                                  --save results/a2_trajectory_violation.npz  # full
+Run:  uv run python run_gate_b.py --quick                                   # smoke (tiny net)
+      uv run python run_gate_b.py --net fc --n-workers 32 \
+                                  --save results/a2_trajectory_violation.npz  # full wide-FC
+      # full-run defaults: n1=n2=32, m=3072, T sweep 16..1024, K 50/100, n_samples 16
 """
 
 from __future__ import annotations
@@ -45,12 +43,14 @@ def build_args():
                     help="network topology (conv added later)")
     ap.add_argument("--seed", type=int, default=0, help="network init seed")
     ap.add_argument("--sample-seed", type=int, default=100, help="x0 batch seed")
-    ap.add_argument("--n1", type=int, default=16)
-    ap.add_argument("--n2", type=int, default=16)
-    ap.add_argument("--m", type=int, default=1, help="velocity dim (smoke=1, full=3072)")
-    ap.add_argument("--T", type=int, nargs="+", default=[16, 64], help="snap-grid resolutions")
-    ap.add_argument("--K", type=int, nargs="+", default=[50], help="Heun step counts")
-    ap.add_argument("--n-samples", type=int, default=10)
+    ap.add_argument("--n1", type=int, default=32)
+    ap.add_argument("--n2", type=int, default=32)
+    ap.add_argument("--m", type=int, default=3072,
+                    help="velocity dim (wide-FC gate=3072; --quick sets the tiny smoke net)")
+    ap.add_argument("--T", type=int, nargs="+", default=[16, 32, 64, 128, 256, 1024],
+                    help="snap-grid resolutions")
+    ap.add_argument("--K", type=int, nargs="+", default=[50, 100], help="Heun step counts")
+    ap.add_argument("--n-samples", type=int, default=16)
     ap.add_argument("--n-workers", type=int, default=1)
     ap.add_argument("--bisect-iters", type=int, default=25)
     ap.add_argument("--save", type=str, default="")
@@ -93,7 +93,8 @@ def verdict_for(rate_at_k50: float | None, cum_curve: np.ndarray) -> str:
 
 def main() -> None:
     a = build_args()
-    if a.quick:
+    if a.quick:                                  # one-flag smoke: tiny net + short sweep
+        a.n1, a.n2, a.m = 16, 16, 1
         a.T, a.K, a.n_samples = [16, 64], [50], 6
 
     print("=== SpikeFlow Stage-1 Gate B: hidden-count cadence drift ===\n")
@@ -130,8 +131,13 @@ def main() -> None:
     if paired_max_all != 0:
         print("  *** INVALID RUN: paired control non-zero -> harness reads counts wrong ***")
 
-    print("\nNOTE: a LOCAL SMOKE result (tiny m) validates the pipeline + verdict logic "
-          "only.\nThe GO/PIVOT decision is the wide-FC run (--m 3072, multi-T, K=50/100).")
+    if a.m < 256:
+        print("\nNOTE: SMOKE config (tiny m) -- validates pipeline + verdict logic ONLY, "
+              "NOT the GO/PIVOT decision.\nRun the wide-FC net (defaults: --n1 32 --n2 32 "
+              "--m 3072) for the real Stage-1 verdict.")
+    else:
+        print(f"\nDECISION RUN: wide-FC m={a.m} n1={a.n1} n2={a.n2} -- this IS the Stage-1 "
+              "GO/PIVOT measurement (read the K=50 rows).")
 
     if a.save:
         import os
