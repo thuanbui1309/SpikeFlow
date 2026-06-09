@@ -15,3 +15,6 @@ plot = ["matplotlib>=3.7"]
 [tool.uv]
 # Run scripts in-tree (import the local `spikeflow/` package); do not build/install it.
 package = false
+
+[dependency-groups]
+dev = ["pytest>=8"]

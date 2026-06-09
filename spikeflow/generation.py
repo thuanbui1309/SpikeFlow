@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import cache_guard
 from .forward import simulate
 from .params import NetworkParams
 
@@ -28,6 +29,7 @@ def velocity(p: NetworkParams, u: np.ndarray, T: int | None = None,
     precision is far below the 1/T snap grid, so it only costs simulation time.
     """
     fwd = simulate(p, u, bisect_iters=bisect_iters)
+    cache_guard.register(fwd)
     if T is None:
         return fwd.Vout_S
     dt_grid = p.S / T
@@ -45,6 +47,7 @@ def sample_pfode(p: NetworkParams, x0: np.ndarray, T: int | None = None,
     psi = x0.astype(float).copy()
     dt = 1.0 / n_steps
     for k in range(n_steps):
+        cache_guard.assert_no_survivors()
         t = k * dt
         v1 = velocity(p, np.concatenate([psi, [t]]), T, bisect_iters)
         v2 = velocity(p, np.concatenate([psi + dt * v1, [min(t + dt, 1.0)]]), T, bisect_iters)
