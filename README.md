@@ -42,7 +42,14 @@ uv run python run_toy_w2.py --n-workers 32 --n-samp 4000 --save results/headline
 # 3. Parallel configuration search (find the regime with the smallest W2 floor).
 uv run python run_config_sweep.py --n-workers 8
 uv run python run_config_sweep.py --quick                        # local smoke test
+
+# 4. Render the generation-bound figure from a saved run (needs the 'plot' extra).
+uv sync --extra plot
+uv run python plot_headline.py results/headline.npz --out results/headline
 ```
+
+For fast iteration use a smaller, looser eval (`--n-steps 8 --n-samp 2500 --n-rep 6`);
+for the final figure raise `--n-samp` / `--n-rep` so the per-T standard error shrinks.
 
 `--n-workers` parallelises the population sampler (run_toy_w2) or the configurations
 (run_config_sweep) across CPU cores — set it to the server core count.
@@ -63,4 +70,5 @@ spikeflow/
 run_finite_diff_gate.py gate driver
 run_toy_w2.py           generation-bound driver (parts A / B' / B)
 run_config_sweep.py     parallel regime search
+plot_headline.py        render the 3-panel generation-bound figure from a saved .npz
 ```
