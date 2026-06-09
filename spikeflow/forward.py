@@ -103,12 +103,15 @@ def _v2_at(V0: float, I0: float, s: float, p: NetworkParams) -> float:
 
 
 def _layer2_next_cross(V2: np.ndarray, I2: np.ndarray, horizon: float,
-                       p: NetworkParams, grid_dt: float) -> tuple[float, int, float]:
+                       p: NetworkParams, grid_dt: float,
+                       bisect_iters: int = 60) -> tuple[float, int, float]:
     """Earliest upward crossing of theta among layer-2 neurons within (0, horizon].
 
     Detection: evaluate V on a fine grid (vectorised over neurons), pick the earliest
-    first upward-crossing cell, then bisect to ~1e-13 so the spike time is a smooth
-    function of parameters.
+    first upward-crossing cell, then bisect so the spike time is a smooth function of
+    parameters. bisect_iters sets only the *time* precision (~horizon/2^iters), not the
+    spike count/order: the gate needs ~machine precision (60), but generation snaps spike
+    times to a 1/T grid afterwards, so a looser bisection (~25) is exact enough and faster.
     """
     if horizon <= 0.0:
         return np.inf, -1, 0.0
@@ -128,7 +131,7 @@ def _layer2_next_cross(V2: np.ndarray, I2: np.ndarray, horizon: float,
             continue
         g = cells[0]
         lo, hi = grid[g], grid[g + 1]
-        for _ in range(60):
+        for _ in range(bisect_iters):
             mid = 0.5 * (lo + hi)
             if _v2_at(V2[n], I2[n], mid, p) < p.theta:
                 lo = mid
@@ -143,8 +146,15 @@ def _layer2_next_cross(V2: np.ndarray, I2: np.ndarray, horizon: float,
     return best_dt, best_n, best_vdot
 
 
-def simulate(p: NetworkParams, u: np.ndarray, grid_dt: float = 0.05) -> ForwardResult:
-    """Run the spiking velocity field on input u=(x_t, t); return v_theta=V_out(S)."""
+def simulate(p: NetworkParams, u: np.ndarray, grid_dt: float = 0.05,
+             bisect_iters: int = 60) -> ForwardResult:
+    """Run the spiking velocity field on input u=(x_t, t); return v_theta=V_out(S).
+
+    bisect_iters controls the layer-2 spike-time precision (default 60 = ~machine
+    precision, required by the finite-difference gate). The generation path passes a
+    smaller value: it snaps spike times to a 1/T grid anyway, so the extra precision
+    is wasted work.
+    """
     b = p.W_in @ u + p.bias
     st = zero_state(p)
     res = ForwardResult(Vout_S=None, b=b)
@@ -155,7 +165,7 @@ def simulate(p: NetworkParams, u: np.ndarray, grid_dt: float = 0.05) -> ForwardR
         # Between layer-1 spikes the layer-2 drive (I2) is fixed, so any layer-2
         # crossing before the next layer-1 spike is final; cap the search there.
         horizon = min(p.S - s_now, dt1)
-        dt2, n2, vdot2 = _layer2_next_cross(st.V2, st.I2, horizon, p, grid_dt)
+        dt2, n2, vdot2 = _layer2_next_cross(st.V2, st.I2, horizon, p, grid_dt, bisect_iters)
         t1 = s_now + dt1
         t2 = s_now + dt2
         next_t = min(t1, t2, p.S)

@@ -16,9 +16,14 @@ from .forward import simulate
 from .params import NetworkParams
 
 
-def velocity(p: NetworkParams, u: np.ndarray, T: int | None = None) -> np.ndarray:
-    """v_theta(x,t) = V_out(S). T=None: exact continuous time. T: spike times on a 1/T grid."""
-    fwd = simulate(p, u)
+def velocity(p: NetworkParams, u: np.ndarray, T: int | None = None,
+             bisect_iters: int = 25) -> np.ndarray:
+    """v_theta(x,t) = V_out(S). T=None: exact continuous time. T: spike times on a 1/T grid.
+
+    bisect_iters=25 (looser than the gate's 60) is plenty here: the exact spike-time
+    precision is far below the 1/T snap grid, so it only costs simulation time.
+    """
+    fwd = simulate(p, u, bisect_iters=bisect_iters)
     if T is None:
         return fwd.Vout_S
     dt_grid = p.S / T
@@ -31,14 +36,14 @@ def velocity(p: NetworkParams, u: np.ndarray, T: int | None = None) -> np.ndarra
 
 
 def sample_pfode(p: NetworkParams, x0: np.ndarray, T: int | None = None,
-                 n_steps: int = 40) -> np.ndarray:
+                 n_steps: int = 40, bisect_iters: int = 25) -> np.ndarray:
     """Integrate dpsi/dt = v_theta(psi,t), psi(0)=x0, t:0->1 (Heun); return psi(1)."""
     psi = x0.astype(float).copy()
     dt = 1.0 / n_steps
     for k in range(n_steps):
         t = k * dt
-        v1 = velocity(p, np.concatenate([psi, [t]]), T)
-        v2 = velocity(p, np.concatenate([psi + dt * v1, [min(t + dt, 1.0)]]), T)
+        v1 = velocity(p, np.concatenate([psi, [t]]), T, bisect_iters)
+        v2 = velocity(p, np.concatenate([psi + dt * v1, [min(t + dt, 1.0)]]), T, bisect_iters)
         psi = psi + 0.5 * dt * (v1 + v2)
     return psi
 
