@@ -140,28 +140,45 @@ def _init_worker(p: NetworkParams) -> None:
 
 
 def _traj_worker(args):
-    x0, T, K, bisect_iters = args
-    return a2_violation_over_trajectory(_WORKER_P, x0, T, K, bisect_iters)
+    i, x0, T, K, bisect_iters = args
+    # Tag the result with its sample index so imap_unordered (which yields in
+    # completion order) can be placed back in seed order -> per_sample_rate stays aligned.
+    return i, a2_violation_over_trajectory(_WORKER_P, x0, T, K, bisect_iters)
 
 
 def aggregate_violation(p: NetworkParams, T: int, K: int, n_samples: int,
                         seed: int = 0, n_workers: int = 1,
-                        bisect_iters: int = 25) -> dict:
+                        bisect_iters: int = 25, progress=None) -> dict:
     """Mean free-run violation_rate + cumulative-flip curve over n_samples x0 seeds.
 
     Each sample is one full paired trajectory pair; the pool parallel axis is the
     sample. cache_guard is process-local module state, safe under mp.Pool (each
     worker has its own _live_results and runs a self-contained rollout).
+
+    progress(done, total): optional heartbeat called as each sample finishes -- the
+    full m=3072 sweep spends minutes per config, so without it a live run is
+    indistinguishable from a hang. Extra workers beyond n_samples are pure idle
+    (the parallel axis is the sample), so the pool is capped at n_samples.
     """
     x0_batch = np.random.default_rng(seed).standard_normal((n_samples, p.m))
+    outs = [None] * n_samples
     if n_workers <= 1:
-        outs = [a2_violation_over_trajectory(p, x0_batch[i], T, K, bisect_iters)
-                for i in range(n_samples)]
+        for i in range(n_samples):
+            outs[i] = a2_violation_over_trajectory(p, x0_batch[i], T, K, bisect_iters)
+            if progress is not None:
+                progress(i + 1, n_samples)
     else:
-        args = [(x0_batch[i], T, K, bisect_iters) for i in range(n_samples)]
-        chunk = max(1, len(args) // (n_workers * 4))
-        with mp.Pool(n_workers, initializer=_init_worker, initargs=(p,)) as pool:
-            outs = pool.map(_traj_worker, args, chunksize=chunk)
+        args = [(i, x0_batch[i], T, K, bisect_iters) for i in range(n_samples)]
+        n_eff = min(n_workers, n_samples)
+        done = 0
+        with mp.Pool(n_eff, initializer=_init_worker, initargs=(p,)) as pool:
+            # imap_unordered + chunksize 1 yields each result the instant a worker
+            # finishes it, so the heartbeat ticks per sample rather than per config.
+            for i, res in pool.imap_unordered(_traj_worker, args, chunksize=1):
+                outs[i] = res
+                done += 1
+                if progress is not None:
+                    progress(done, n_samples)
 
     freerun = np.stack([o["freerun_flip"] for o in outs])      # [n, K] bool
     cum = np.stack([o["cumulative_flip"] for o in outs])       # [n, K] int

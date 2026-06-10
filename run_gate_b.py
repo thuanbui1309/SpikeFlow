@@ -25,12 +25,15 @@ Run:  uv run python run_gate_b.py --quick                                   # sm
 from __future__ import annotations
 
 import argparse
+import sys
+import time
 
 import numpy as np
 
 from spikeflow import cache_guard
 from spikeflow.fc_params import init_fc_params
-from spikeflow.trajectory_metrics import aggregate_violation
+from spikeflow.forward import simulate
+from spikeflow.trajectory_metrics import a2_violation_over_trajectory, aggregate_violation
 
 GO_RATE = 0.05
 PIVOT_RATE = 0.20
@@ -55,6 +58,9 @@ def build_args():
     ap.add_argument("--bisect-iters", type=int, default=25)
     ap.add_argument("--save", type=str, default="")
     ap.add_argument("--quick", action="store_true", help="tiny config for a smoke test")
+    ap.add_argument("--probe", action="store_true",
+                    help="time ONE simulate + ONE worst-case trajectory, print an ETA, "
+                         "then exit -- a fast 'is it hung or just slow?' diagnostic")
     return ap.parse_args()
 
 
@@ -91,6 +97,52 @@ def verdict_for(rate_at_k50: float | None, cum_curve: np.ndarray) -> str:
     return "BORDERLINE"
 
 
+def run_probe(p, a) -> None:
+    """Cost diagnostic: time one simulate + one worst-case trajectory, estimate the sweep.
+
+    Answers 'is the full run hung or just slow?' without committing to the multi-hour
+    sweep. The trajectory cost is ~T-independent (T only sets the readout snap grid, not
+    the event count), so timing the largest K at one T scales to every config by K.
+    """
+    rng = np.random.default_rng(a.sample_seed)
+    x0 = rng.standard_normal(p.m)
+    u0 = np.concatenate([x0, [0.0]])
+
+    t0 = time.perf_counter()
+    fwd = simulate(p, u0, bisect_iters=a.bisect_iters)
+    sim_s = time.perf_counter() - t0
+    n1 = sum(1 for e in fwd.events if e.layer == 1)
+    n2 = sum(1 for e in fwd.events if e.layer == 2)
+    print(f"[probe] one simulate at x0,t=0: {sim_s*1e3:.1f} ms  "
+          f"events n1={n1} n2={n2} total={n1+n2}")
+    if n1 + n2 > 20000:
+        print("  *** WARNING: spike count >20k -- drive likely over-scaled (check w_in "
+              "fan-in); each simulate is very expensive and the sweep will crawl ***")
+
+    K_max, T_max = max(a.K), max(a.T)
+    print(f"[probe] timing ONE worst-case trajectory T={T_max} K={K_max} "
+          f"(4 simulate/Heun step)...", flush=True)
+    t0 = time.perf_counter()
+    a2_violation_over_trajectory(p, x0, T_max, K_max, a.bisect_iters)
+    traj_s = time.perf_counter() - t0
+    print(f"[probe] one trajectory: {traj_s:.1f} s")
+
+    n_eff = min(a.n_workers, a.n_samples)
+    total_s = 0.0
+    for K in a.K:
+        per_traj = traj_s * (K / K_max)                 # cost scales ~linearly in K
+        waves = -(-a.n_samples // n_eff)                # ceil(n_samples / n_eff)
+        per_config = per_traj * waves
+        total_s += per_config * len(a.T)
+    print(f"[probe] ESTIMATE full sweep ({len(a.K)*len(a.T)} configs, n_samples="
+          f"{a.n_samples}, n_eff_workers={n_eff}): ~{total_s/60:.1f} min "
+          f"(~{total_s/3600:.2f} h)")
+    print("[probe] (K=50 decision rows finish in roughly the first "
+          f"{total_s/60 * (sum(K for K in a.K if K <= DECISION_K)/sum(a.K)):.1f} min)")
+    print("\n[probe] done -- this was a diagnostic only, NO sweep was run. "
+          "Drop --probe to run the real sweep.")
+
+
 def main() -> None:
     a = build_args()
     if a.quick:                                  # one-flag smoke: tiny net + short sweep
@@ -109,23 +161,57 @@ def main() -> None:
     print(f"net={a.net}  n1={a.n1} n2={a.n2} m={a.m}  "
           f"T={a.T}  K={a.K}  n_samples={a.n_samples}  workers={a.n_workers}\n")
 
+    if a.probe:
+        run_probe(p, a)
+        return
+
+    n_configs = len(a.K) * len(a.T)
+    print(f"sweeping {n_configs} configs (K={DECISION_K} decision rows print FIRST); "
+          "each row appears as it finishes -- silence between rows = a config in flight,\n"
+          "NOT a hang (m=3072 spends minutes per config; run --probe first for an ETA).\n")
+    print(f"{'T':>6} {'K':>5} {'free_rate':>11} {'paired':>7} {'cum_flips':>11} "
+          f"{'wall_s':>8}  verdict")
+    print("-" * 78)
+
     rows, curves = [], {}
     paired_max_all = 0
+    cfg_i = 0
+    sweep_t0 = time.perf_counter()
     for K in a.K:
         for T in a.T:
+            cfg_i += 1
+
+            # In-place \r heartbeat only on a real terminal; piped/redirected logs (the
+            # ones pasted back over the push/pull loop) get one clean line per sample.
+            tty = sys.stderr.isatty()
+
+            def tick(done, total, _T=T, _K=K, _i=cfg_i):
+                if tty:
+                    print(f"\r  [{_i}/{n_configs}] T={_T:>4} K={_K:>3}  "
+                          f"sample {done}/{total} done...", end="", file=sys.stderr, flush=True)
+                elif done == total:
+                    print(f"  [{_i}/{n_configs}] T={_T} K={_K}  {total} samples done",
+                          file=sys.stderr, flush=True)
+
+            cfg_t0 = time.perf_counter()
             agg = aggregate_violation(p, T, K, a.n_samples, seed=a.sample_seed,
-                                      n_workers=a.n_workers, bisect_iters=a.bisect_iters)
+                                      n_workers=a.n_workers, bisect_iters=a.bisect_iters,
+                                      progress=tick)
+            cfg_wall = time.perf_counter() - cfg_t0
+            if tty:
+                print("\r" + " " * 60 + "\r", end="", file=sys.stderr, flush=True)  # clear tick
             cum = agg["cumulative_flip_curve"]
             curves[(T, K)] = cum
             paired_max_all = max(paired_max_all, agg["paired_control_max"])
             vd = verdict_for(agg["violation_rate"] if K == DECISION_K else None, cum)
             rows.append((T, K, agg["violation_rate"], agg["paired_control_max"],
                          float(cum[-1]), vd))
+            print(f"{T:>6} {K:>5} {agg['violation_rate']:>11.4f} "
+                  f"{agg['paired_control_max']:>7} {float(cum[-1]):>11.3f} "
+                  f"{cfg_wall:>8.1f}  {vd}", flush=True)
 
-    print(f"{'T':>6} {'K':>5} {'free_rate':>11} {'paired':>7} {'cum_flips':>11}  verdict")
-    print("-" * 64)
-    for T, K, rate, pm, cum_end, vd in rows:
-        print(f"{T:>6} {K:>5} {rate:>11.4f} {pm:>7} {cum_end:>11.3f}  {vd}")
+    print("-" * 78)
+    print(f"sweep wall: {(time.perf_counter() - sweep_t0)/60:.1f} min")
 
     print(f"\npaired-control max flips (MUST be 0) = {paired_max_all}")
     if paired_max_all != 0:
