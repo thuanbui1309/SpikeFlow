@@ -1,22 +1,14 @@
-"""Stage-1 Gate B: hidden-spike-COUNT cadence drift of the snapped vs exact sampler.
+"""Stage-1 Gate B (dense FC): hidden-count cadence drift of the snapped vs exact sampler.
 
-For each (T, K) it rolls n_samples paired Heun trajectories (one exact T=None, one
-snapped T) from shared x0 seeds and measures the FREE-RUN violation_rate (fraction of
-(sample, step) pairs where the integer total hidden count differs between the two
-state paths) plus the cumulative-flip curve. The paired-same-state rate is a sanity
-control that must be 0 (counts are T-independent at fixed input).
+Thin driver: builds the wide dense FC velocity net and hands it to the shared sweep
+engine (`spikeflow.gate_b_sweep`). The conv stage uses the same engine via
+`run_gate_b_conv.py`.
 
-Verdict per (T, K):
-  GO       : free-run rate <= 0.05 at K=50 AND cumulative flips stay <= 0.05*(k+1)
-             for all k (no super-linear compounding) -> cadence stable.
-  PIVOT    : free-run rate >= 0.20 at K=50 OR super-linear cumulative growth
-             (final cumulative >> 0.05*K) -> drift feeds drift.
-  BORDERLINE: rate in (0.05, 0.20) -> report, do not auto-decide.
+The LOCAL SMOKE config (tiny m) exercises the pipeline + verdict logic only; it is NOT
+the GO/PIVOT decision. The real verdict is the wide-FC m=3072 multi-T run.
 
-The LOCAL SMOKE config (tiny m) exercises the pipeline + verdict logic only; it is
-NOT the GO/PIVOT decision. The real verdict is the wide-FC m=3072 multi-T run.
-
-Run:  uv run python run_gate_b.py --quick                                   # smoke (tiny net)
+Run:  uv run python run_gate_b.py --quick                                    # smoke (tiny net)
+      uv run python run_gate_b.py --net fc --n-workers 32 --probe            # cost/ETA only
       uv run python run_gate_b.py --net fc --n-workers 32 \
                                   --save results/a2_trajectory_violation.npz  # full wide-FC
       # full-run defaults: n1=n2=32, m=3072, T sweep 16..1024, K 50/100, n_samples 16
@@ -25,25 +17,15 @@ Run:  uv run python run_gate_b.py --quick                                   # sm
 from __future__ import annotations
 
 import argparse
-import sys
-import time
 
-import numpy as np
-
-from spikeflow import cache_guard
+from spikeflow import gate_b_sweep as gb
 from spikeflow.fc_params import init_fc_params
-from spikeflow.forward import simulate
-from spikeflow.trajectory_metrics import a2_violation_over_trajectory, aggregate_violation
-
-GO_RATE = 0.05
-PIVOT_RATE = 0.20
-DECISION_K = 50
 
 
 def build_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--net", type=str, default="fc", choices=["fc"],
-                    help="network topology (conv added later)")
+                    help="network topology (conv has its own driver)")
     ap.add_argument("--seed", type=int, default=0, help="network init seed")
     ap.add_argument("--sample-seed", type=int, default=100, help="x0 batch seed")
     ap.add_argument("--n1", type=int, default=32)
@@ -64,94 +46,15 @@ def build_args():
     return ap.parse_args()
 
 
-def self_check_cache_guard() -> bool:
-    """Prove the cross-step tripwire is live: a held dummy must trip the assert."""
-    class _Dummy:
-        pass
-
-    cache_guard.assert_no_survivors()           # start clean
-    held = _Dummy()
-    cache_guard.register(held)                  # strong ref held across the boundary
-    try:
-        cache_guard.assert_no_survivors()
-        return False                            # should have raised
-    except RuntimeError:
-        pass
-    del held
-    cache_guard.assert_no_survivors()           # clears -> clean again
-    return True
-
-
-def verdict_for(rate_at_k50: float | None, cum_curve: np.ndarray) -> str:
-    """GO / PIVOT / BORDERLINE from the K=50 free-run rate + cumulative growth shape."""
-    k = len(cum_curve)
-    linear_bound = GO_RATE * (np.arange(k) + 1)
-    superlinear = cum_curve[-1] > 2.0 * GO_RATE * k          # final >> linear envelope
-    within_linear = bool(np.all(cum_curve <= linear_bound + 1e-9))
-    if rate_at_k50 is None:                                  # K!=50: shape-only signal
-        return "PIVOT" if superlinear else "GO (shape only; decision K=50 not run)"
-    if rate_at_k50 >= PIVOT_RATE or superlinear:
-        return "PIVOT"
-    if rate_at_k50 <= GO_RATE and within_linear:
-        return "GO"
-    return "BORDERLINE"
-
-
-def run_probe(p, a) -> None:
-    """Cost diagnostic: time one simulate + one worst-case trajectory, estimate the sweep.
-
-    Answers 'is the full run hung or just slow?' without committing to the multi-hour
-    sweep. The trajectory cost is ~T-independent (T only sets the readout snap grid, not
-    the event count), so timing the largest K at one T scales to every config by K.
-    """
-    rng = np.random.default_rng(a.sample_seed)
-    x0 = rng.standard_normal(p.m)
-    u0 = np.concatenate([x0, [0.0]])
-
-    t0 = time.perf_counter()
-    fwd = simulate(p, u0, bisect_iters=a.bisect_iters)
-    sim_s = time.perf_counter() - t0
-    n1 = sum(1 for e in fwd.events if e.layer == 1)
-    n2 = sum(1 for e in fwd.events if e.layer == 2)
-    print(f"[probe] one simulate at x0,t=0: {sim_s*1e3:.1f} ms  "
-          f"events n1={n1} n2={n2} total={n1+n2}")
-    if n1 + n2 > 20000:
-        print("  *** WARNING: spike count >20k -- drive likely over-scaled (check w_in "
-              "fan-in); each simulate is very expensive and the sweep will crawl ***")
-
-    K_max, T_max = max(a.K), max(a.T)
-    print(f"[probe] timing ONE worst-case trajectory T={T_max} K={K_max} "
-          f"(4 simulate/Heun step)...", flush=True)
-    t0 = time.perf_counter()
-    a2_violation_over_trajectory(p, x0, T_max, K_max, a.bisect_iters)
-    traj_s = time.perf_counter() - t0
-    print(f"[probe] one trajectory: {traj_s:.1f} s")
-
-    n_eff = min(a.n_workers, a.n_samples)
-    total_s = 0.0
-    for K in a.K:
-        per_traj = traj_s * (K / K_max)                 # cost scales ~linearly in K
-        waves = -(-a.n_samples // n_eff)                # ceil(n_samples / n_eff)
-        per_config = per_traj * waves
-        total_s += per_config * len(a.T)
-    print(f"[probe] ESTIMATE full sweep ({len(a.K)*len(a.T)} configs, n_samples="
-          f"{a.n_samples}, n_eff_workers={n_eff}): ~{total_s/60:.1f} min "
-          f"(~{total_s/3600:.2f} h)")
-    print("[probe] (K=50 decision rows finish in roughly the first "
-          f"{total_s/60 * (sum(K for K in a.K if K <= DECISION_K)/sum(a.K)):.1f} min)")
-    print("\n[probe] done -- this was a diagnostic only, NO sweep was run. "
-          "Drop --probe to run the real sweep.")
-
-
 def main() -> None:
     a = build_args()
     if a.quick:                                  # one-flag smoke: tiny net + short sweep
         a.n1, a.n2, a.m = 16, 16, 1
         a.T, a.K, a.n_samples = [16, 64], [50], 6
 
-    print("=== SpikeFlow Stage-1 Gate B: hidden-count cadence drift ===\n")
+    print("=== SpikeFlow Stage-1 Gate B (dense FC): hidden-count cadence drift ===\n")
 
-    guard_ok = self_check_cache_guard()
+    guard_ok = gb.self_check_cache_guard()
     print(f"cache-guard tripwire live = {guard_ok}")
     if not guard_ok:
         raise SystemExit("ABORT: cross-step cache-guard did not fire; tripwire is not "
@@ -162,64 +65,16 @@ def main() -> None:
           f"T={a.T}  K={a.K}  n_samples={a.n_samples}  workers={a.n_workers}\n")
 
     if a.probe:
-        run_probe(p, a)
+        gb.run_probe(p, a.T, a.K, a.n_samples, a.n_workers, a.bisect_iters, a.sample_seed)
         return
 
-    n_configs = len(a.K) * len(a.T)
-    print(f"sweeping {n_configs} configs (K={DECISION_K} decision rows print FIRST); "
-          "each row appears as it finishes -- silence between rows = a config in flight,\n"
-          "NOT a hang (m=3072 spends minutes per config; run --probe first for an ETA).\n")
-    print(f"{'T':>6} {'K':>5} {'free_rate':>11} {'paired':>7} {'cum_flips':>11} "
-          f"{'wall_s':>8}  verdict")
-    print("-" * 78)
+    rows, curves, paired_max = gb.run_sweep(p, a.T, a.K, a.n_samples, a.n_workers,
+                                            a.bisect_iters, a.sample_seed)
 
-    rows, curves = [], {}
-    paired_max_all = 0
-    cfg_i = 0
-    sweep_t0 = time.perf_counter()
-    for K in a.K:
-        for T in a.T:
-            cfg_i += 1
-
-            # In-place \r heartbeat only on a real terminal; piped/redirected logs (the
-            # ones pasted back over the push/pull loop) get one clean line per sample.
-            tty = sys.stderr.isatty()
-
-            def tick(done, total, _T=T, _K=K, _i=cfg_i):
-                if tty:
-                    print(f"\r  [{_i}/{n_configs}] T={_T:>4} K={_K:>3}  "
-                          f"sample {done}/{total} done...", end="", file=sys.stderr, flush=True)
-                elif done == total:
-                    print(f"  [{_i}/{n_configs}] T={_T} K={_K}  {total} samples done",
-                          file=sys.stderr, flush=True)
-
-            cfg_t0 = time.perf_counter()
-            agg = aggregate_violation(p, T, K, a.n_samples, seed=a.sample_seed,
-                                      n_workers=a.n_workers, bisect_iters=a.bisect_iters,
-                                      progress=tick)
-            cfg_wall = time.perf_counter() - cfg_t0
-            if tty:
-                print("\r" + " " * 60 + "\r", end="", file=sys.stderr, flush=True)  # clear tick
-            cum = agg["cumulative_flip_curve"]
-            curves[(T, K)] = cum
-            paired_max_all = max(paired_max_all, agg["paired_control_max"])
-            vd = verdict_for(agg["violation_rate"] if K == DECISION_K else None, cum)
-            rows.append((T, K, agg["violation_rate"], agg["paired_control_max"],
-                         float(cum[-1]), vd))
-            print(f"{T:>6} {K:>5} {agg['violation_rate']:>11.4f} "
-                  f"{agg['paired_control_max']:>7} {float(cum[-1]):>11.3f} "
-                  f"{cfg_wall:>8.1f}  {vd}", flush=True)
-
-    print("-" * 78)
-    print(f"sweep wall: {(time.perf_counter() - sweep_t0)/60:.1f} min")
-
-    print(f"\npaired-control max flips (MUST be 0) = {paired_max_all}")
-    if paired_max_all != 0:
+    print(f"\npaired-control max flips (MUST be 0) = {paired_max}")
+    if paired_max != 0:
         print("  *** INVALID RUN: paired control non-zero -> harness reads counts wrong ***")
 
-    # The scope marker must survive into the saved report: the report file is what
-    # gets read on the other side of the push/pull loop, and a smoke-scale run is
-    # indistinguishable from the decision run by its table alone.
     if a.m < 256:
         scope = ("SMOKE config (tiny m) -- validates pipeline + verdict logic ONLY, "
                  "NOT the GO/PIVOT decision")
@@ -232,25 +87,13 @@ def main() -> None:
               "Stage-1 verdict.")
 
     if a.save:
-        import os
-        os.makedirs(os.path.dirname(a.save) or ".", exist_ok=True)
-        save = {f"cum_T{T}_K{K}": cum for (T, K), cum in curves.items()}
-        save["Ts"] = np.array(a.T)
-        save["Ks"] = np.array(a.K)
-        save["rate_table"] = np.array([(T, K, r) for T, K, r, *_ in rows], dtype=float)
-        save["paired_max"] = paired_max_all
-        save["net_config"] = np.array([a.n1, a.n2, a.m, a.n_samples])
-        np.savez(a.save, **save)
-        report = a.save.rsplit(".", 1)[0] + "_report.txt"
-        with open(report, "w") as f:
-            f.write("SpikeFlow Stage-1 Gate B: hidden-count cadence drift\n")
-            f.write(f"net={a.net} n1={a.n1} n2={a.n2} m={a.m} n_samples={a.n_samples}\n")
-            f.write(f"scope: {scope}\n")
-            f.write(f"cache-guard live={guard_ok}  paired_control_max={paired_max_all}\n\n")
-            f.write(f"{'T':>6} {'K':>5} {'free_rate':>11} {'cum_flips':>11}  verdict\n")
-            for T, K, rate, pm, cum_end, vd in rows:
-                f.write(f"{T:>6} {K:>5} {rate:>11.4f} {cum_end:>11.3f}  {vd}\n")
-        print(f"\nsaved curves -> {a.save}\nsaved report -> {report}")
+        gb.save_gate_b(
+            a.save, a.T, a.K, rows, curves, paired_max,
+            net_config=[a.n1, a.n2, a.m, a.n_samples],
+            title="SpikeFlow Stage-1 Gate B (dense FC): hidden-count cadence drift",
+            header_line=f"net={a.net} n1={a.n1} n2={a.n2} m={a.m} n_samples={a.n_samples}",
+            scope=scope, guard_ok=guard_ok,
+        )
 
 
 if __name__ == "__main__":
