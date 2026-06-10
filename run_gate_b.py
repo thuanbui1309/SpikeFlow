@@ -131,13 +131,19 @@ def main() -> None:
     if paired_max_all != 0:
         print("  *** INVALID RUN: paired control non-zero -> harness reads counts wrong ***")
 
+    # The scope marker must survive into the saved report: the report file is what
+    # gets read on the other side of the push/pull loop, and a smoke-scale run is
+    # indistinguishable from the decision run by its table alone.
     if a.m < 256:
-        print("\nNOTE: SMOKE config (tiny m) -- validates pipeline + verdict logic ONLY, "
-              "NOT the GO/PIVOT decision.\nRun the wide-FC net (defaults: --n1 32 --n2 32 "
-              "--m 3072) for the real Stage-1 verdict.")
+        scope = ("SMOKE config (tiny m) -- validates pipeline + verdict logic ONLY, "
+                 "NOT the GO/PIVOT decision")
     else:
-        print(f"\nDECISION RUN: wide-FC m={a.m} n1={a.n1} n2={a.n2} -- this IS the Stage-1 "
-              "GO/PIVOT measurement (read the K=50 rows).")
+        scope = (f"DECISION RUN: wide-FC m={a.m} n1={a.n1} n2={a.n2} -- this IS the "
+                 "Stage-1 GO/PIVOT measurement (read the K=50 rows)")
+    print(f"\n{scope}")
+    if a.m < 256:
+        print("Run the wide-FC net (defaults: --n1 32 --n2 32 --m 3072) for the real "
+              "Stage-1 verdict.")
 
     if a.save:
         import os
@@ -147,11 +153,13 @@ def main() -> None:
         save["Ks"] = np.array(a.K)
         save["rate_table"] = np.array([(T, K, r) for T, K, r, *_ in rows], dtype=float)
         save["paired_max"] = paired_max_all
+        save["net_config"] = np.array([a.n1, a.n2, a.m, a.n_samples])
         np.savez(a.save, **save)
         report = a.save.rsplit(".", 1)[0] + "_report.txt"
         with open(report, "w") as f:
             f.write("SpikeFlow Stage-1 Gate B: hidden-count cadence drift\n")
             f.write(f"net={a.net} n1={a.n1} n2={a.n2} m={a.m} n_samples={a.n_samples}\n")
+            f.write(f"scope: {scope}\n")
             f.write(f"cache-guard live={guard_ok}  paired_control_max={paired_max_all}\n\n")
             f.write(f"{'T':>6} {'K':>5} {'free_rate':>11} {'cum_flips':>11}  verdict\n")
             for T, K, rate, pm, cum_end, vd in rows:
